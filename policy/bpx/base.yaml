@@ -1,0 +1,35 @@
+# Copyright (c) 2024-2025 Ziqi Fan
+# SPDX-License-Identifier: Apache-2.0
+
+bpx:
+  dt: 0.005
+  decimation: 4
+  num_of_dofs: 12
+  wheel_indices: []
+
+  # 下面的顺序 = mjcf 的 <actuator> / <sensor> 顺序 = fl, fr, hl, hr（每腿 roll / pitch / knee）
+  fixed_kp: [80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0,
+             80.0, 80.0, 80.0]
+  fixed_kd: [3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0,
+             3.0, 3.0, 3.0]
+  torque_limits: [30.0, 30.0, 30.0,
+                  30.0, 30.0, 30.0,
+                  30.0, 30.0, 30.0,
+                  30.0, 30.0, 30.0]
+  default_dof_pos: [ 0.00, 0.80, -1.50,
+                     0.00, 0.80, -1.50,
+                     0.00, 0.80, -1.50,
+                     0.00, 0.80, -1.50]
+  joint_names: ["fl_hip_roll_joint", "fl_hip_pitch_joint", "fl_knee_joint",
+                "fr_hip_roll_joint", "fr_hip_pitch_joint", "fr_knee_joint",
+                "hl_hip_roll_joint", "hl_hip_pitch_joint", "hl_knee_joint",
+                "hr_hip_roll_joint", "hr_hip_pitch_joint", "hr_knee_joint"]
+  joint_controller_names: ["fl_hip_roll_controller", "fl_hip_pitch_controller", "fl_knee_controller",
+                           "fr_hip_roll_controller", "fr_hip_pitch_controller", "fr_knee_controller",
+                           "hl_hip_roll_controller", "hl_hip_pitch_controller", "hl_knee_controller",
+                           "hr_hip_roll_controller", "hr_hip_pitch_controller", "hr_knee_controller"]
+  joint_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
