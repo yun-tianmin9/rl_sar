@@ -33,3 +33,4 @@ bpx:
                            "hl_hip_roll_controller", "hl_hip_pitch_controller", "hl_knee_controller",
                            "hr_hip_roll_controller", "hr_hip_pitch_controller", "hr_knee_controller"]
   joint_mapping: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+  # joint_mapping: [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]

@@ -143,6 +143,89 @@ SetCommand:    ctrl[joint_mapping[i]] = ...
 > 这里成立的前提是：`<actuator>` 的顺序与 `<jointpos>` 的顺序一致。
 > 若不一致，需自行建立"策略序号 → actuator 序号"的独立映射。
 
+> ⚠️ **`base.yaml` 恒等 ≠ 策略 config.yaml 也恒等。** 恰恰相反：config.yaml 的
+> `joint_mapping` 基本不可能是恒等，因为训练侧的关节顺序由训练框架决定，与 mjcf 无关。
+> 见 1.4.1。
+
+#### 1.4.1 训练侧的关节顺序怎么定（★实测最常翻车的一步）
+
+`joint_mapping` 和 `default_dof_pos` **必须同时从训练环境的 `joint_names` 推出来**，
+分开猜必然对不上。三步：
+
+**第一步 · 拿 ground truth（唯一权威来源）**
+
+```python
+# IsaacLab：env 建好之后
+print(env.unwrapped.scene["robot"].joint_names)
+```
+
+这个列表就是**策略顺序**。特别注意它**不等于**：
+
+- URDF 里 `<joint>` 的书写顺序 ❌
+- mjcf 的 `<actuator>` / `<sensor>` 顺序 ❌
+
+**第二步 · 换算 `joint_mapping`**
+
+`joint_mapping[i]` = 策略第 `i` 个关节在 mjcf 里的下标：
+
+```python
+mjcf = ["fl_hip_roll_joint", "fl_hip_pitch_joint", "fl_knee_joint",     # bpx 的 mjcf 顺序
+        "fr_hip_roll_joint", "fr_hip_pitch_joint", "fr_knee_joint",
+        "hl_hip_roll_joint", "hl_hip_pitch_joint", "hl_knee_joint",
+        "hr_hip_roll_joint", "hr_hip_pitch_joint", "hr_knee_joint"]
+print([mjcf.index(n) for n in env.unwrapped.scene["robot"].joint_names])
+```
+
+**第三步 · 换算 `default_dof_pos`**
+
+`default_dof_pos[i]` = `joint_names[i]` 这个关节在训练里的默认角，取自训练资产 cfg 的
+`init_state.joint_pos` 正则（himloco 的 bpx 是 `.*_hip_roll=0.0` / `.*_hip_pitch=0.8` / `.*_knee=-1.5`）：
+
+```python
+def default_of(n):
+    if n.endswith("hip_roll_joint"):  return 0.0
+    if n.endswith("hip_pitch_joint"): return 0.8
+    if n.endswith("knee_joint"):      return -1.5
+print([default_of(n) for n in env.unwrapped.scene["robot"].joint_names])
+```
+
+> **一句判据**：`default_dof_pos[i]` 恒等于 `joint_names[i]` 这个关节的训练默认角。
+> 两者同源，改一个必须改另一个。
+
+##### 坑：IsaacSim 的 URDF importer **不保序**
+
+IsaacLab 从 URDF 导入时，articulation 的关节顺序**不等于** URDF 里 `<joint>` 的书写顺序。
+bpx 实测是**层序（宽度优先）**：
+
+```
+torso 的 4 个直接子关节 → 四条腿的 hip_roll
+（腿的顺序 = URDF 里 leg link 的声明顺序 fl, fr, hl, hr）
+        ↓
+四个 hip_pitch  →  四个 knee
+```
+
+即 `fl_roll, fr_roll, hl_roll, hr_roll, fl_pitch, fr_pitch, hl_pitch, hr_pitch, fl_knee, fr_knee, hl_knee, hr_knee`，
+对应 `joint_mapping: [0, 3, 6, 9,  1, 4, 7, 10,  2, 5, 8, 11]`。
+
+而 bpx 的 URDF 里关节是按「每条腿一组」写的（`fl_roll, fl_pitch, fl_knee, fr_roll, …`），
+**照抄文档顺序会得到恒等映射，那是错的**。
+
+> 这条结论来自 bpx 一次实跑（见附录 B）。换机器人时仍要用第一步的 `joint_names` 确认，
+> 不要直接套用"层序"这个经验。
+
+##### 怎么验收（两个测试，各验一半）
+
+站立姿态天生四腿对称（四条腿的 roll/pitch/knee 相同），所以腿序错了在站立时**看不出来**：
+
+| 测试 | 验的是 | 通过 | 不通过 |
+|---|---|---|---|
+| `0` 站好后按 `1`，**不给速度指令** | 同一条腿内 roll/pitch/knee 的次序 | 原地站住 | 侧翻 / 肚皮朝上 |
+| 按 `W` 给正前方指令 | 腿与腿之间的次序 | 直着往前走 | 横走 / 镜像 / 打转 |
+
+**为什么"侧翻"指向腿内次序错**：站立时观测里 `dof_pos - default_dof_pos` 应该恰好是 0。
+若只有腿序错，四条腿的值相同 → 差仍是 0 → 策略不会乱动；若腿内次序错，差会变成
+`[±0.8, ∓0.8, 0, …]` 这种大值 → 策略立刻输出大动作 → roll 方向翻过去。
+
 ### 1.5 YAML 顶层 key 契约（★最容易错）
 
 `ReadYaml` 做的是 `YAML::LoadFile(path)[file_path]`：
@@ -603,7 +686,9 @@ actions      N
 
 > `joint_mapping[i]` = 训练顺序里第 `i` 个关节，在 mjcf 里的下标。
 
-mjcf / base.yaml 的顺序（以 bpx 为例）：
+**这一步必须从训练侧的 `joint_names` 反推，不能照抄 URDF 文档顺序** —— 完整方法与验收见 1.4.1。
+
+以 bpx 为例（mjcf / base.yaml 顺序）：
 
 ```
  0 fl_hip_roll   1 fl_hip_pitch   2 fl_knee
@@ -612,14 +697,29 @@ mjcf / base.yaml 的顺序（以 bpx 为例）：
  9 hr_hip_roll  10 hr_hip_pitch  11 hr_knee
 ```
 
-- 训练顺序相同 → `[0,1,2,3,4,5,6,7,8,9,10,11]`
-- 训练顺序是 fl/fr/**hr/hl** → `[0,1,2, 3,4,5, 9,10,11, 6,7,8]`
+- **bpx 实测（按关节类型分组，腿序 fl→fr→hl→hr）** → `[0,3,6,9, 1,4,7,10, 2,5,8,11]`
+  - 配套 `default_dof_pos`：`[0,0,0,0, 0.8,0.8,0.8,0.8, -1.5,-1.5,-1.5,-1.5]`
+  - **两者必须同时改**，只改一个会在站立时就侧翻
+- 训练顺序与 mjcf 相同（**少见**，别默认）→ `[0,1,2,3,4,5,6,7,8,9,10,11]`
+- go2 的 himloco（IsaacLab 自带 USD，顺序 FL/FR/RL/RR，每条腿 roll-pitch-knee）
+  → `[3,4,5, 0,1,2, 9,10,11, 6,7,8]`
 
 [README.md](../README.md) 里的官方口径可以直接用：
 
 > The order of joints in robot_lab cfg file `joint_names` is the same as that defined in `xxx/robot_lab/config.yaml` in this project.
 
 即：**训练框架 cfg 里的 `joint_names` 列表顺序 = 本 config.yaml 的顺序**，据此换算成 `joint_mapping`。
+
+**从训练资产 cfg 抄三个增益值**（与关节顺序无关，但同样属于"必须与训练一致"）：
+
+| config.yaml | 训练侧来源 | bpx/himloco 实测 |
+|---|---|---|
+| `rl_kp` | `DCMotorCfg.stiffness` | `45.0` |
+| `rl_kd` | `DCMotorCfg.damping` | `1.2` |
+| `torque_limits` | `effort_limit`（与 mjcf `ctrlrange` 一致） | `30.0` |
+
+> ⚠️ `rl_kd` 很容易被想当然写成 0.5 之类的小值。它就是训练的 `damping`，
+> 写小了仿真会抖、会晃，并不是"更软更安全"。
 
 #### 7b. `.pt` 模型
 
@@ -760,7 +860,10 @@ PY
 | 走两步掉出地面 | 地面用了有界平面 | Step 4，改 `size="0 0 0.05"` |
 | 启动即穿地或悬空 | 出生高度不对 | Step 1 |
 | 策略跑起来但原地不动 / 动作幅度极小 | `action_scale` 或 `rl_kp` 与训练不一致 | Step 7a 第二类字段 |
-| 策略跑起来但完全乱动 | `joint_mapping` 与训练不一致 | Step 7a 的换算规则 |
+| 策略跑起来但完全乱动 | `joint_mapping` 与训练不一致 | 1.4.1 的换算规则 |
+| 按 `1` 后**侧翻 / 肚皮朝上** | `joint_mapping` 与 `default_dof_pos` 不配对（多半是同一条腿内 roll/pitch/knee 的次序错） | 1.4.1 的"两个测试"；两者必须同时改 |
+| 能站住，一给速度指令就横走 / 打转 | 腿与腿之间的次序错 | 1.4.1，换一种腿排列 |
+| 站立/行走时发抖、晃动不止 | `rl_kd` 比训练的 `damping` 小 | Step 7a 的增益表 |
 
 ---
 
@@ -799,6 +902,9 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 ./cmake_build/bin/rl_sim_muj
 | 复制描述目录时改了 `<robot>_description` 的名字 | 模型找不到 |
 | 复制别的机器人的 policy 目录后没改顶层 key | 见 5.2 第三行 |
 | 复制别的机器人的 `.pt` | 必然摔倒，且掩盖真实问题 |
+| 拿 URDF 文档顺序当训练关节顺序（想当然填恒等映射） | 站立就侧翻 / 肚皮朝上 |
+| 只改 `joint_mapping` 不改 `default_dof_pos` | 同上——两者同源，必须一起改 |
+| `rl_kd` 抄成 0.5 这类小值（训练的 `damping` 是 1.2） | 仿真发抖、晃动 |
 
 ### 5.3 设计类
 
@@ -858,7 +964,7 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 ./cmake_build/bin/rl_sim_muj
 | 场景名 | `scene` |
 | 自由度数 N | 12 |
 | 描述目录 | `src/rl_sar_zoo/bpx_description/` |
-| 关节顺序 | `fl_*`, `fr_*`, `hl_*`, `hr_*`，每腿 `hip_roll` / `hip_pitch` / `knee` |
+| 关节顺序（mjcf / `base.yaml`） | `fl_*`, `fr_*`, `hl_*`, `hr_*`，每腿 `hip_roll` / `hip_pitch` / `knee` |
 | 关节轴 | 髋 roll `(1,0,0)`；大腿、膝 `(0,1,0)` |
 | 膝限位 | `[-2.7531, -0.5539]` |
 | 出生高度 | `pos="0 0 0.50"`（计算值 0.5006） |
@@ -873,6 +979,23 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 ./cmake_build/bin/rl_sim_muj
 | FSM 文件 | `src/rl_sar/fsm_robot/fsm_bpx.hpp` |
 | FSM 类型串 | `"bpx"` |
 
+以上是 **`base.yaml`**（= mjcf 顺序）的落地值。**策略 `config.yaml` 的那份是另一套**，
+它由训练侧决定，实测（himloco_lab 训出的 `bpx_rough/policy.pt`）：
+
+| strategy `config.yaml` | 值 |
+|---|---|
+| 训练关节顺序 | 按关节类型分组，腿序 fl→fr→hl→hr |
+| `joint_mapping` | `[0, 3, 6, 9,  1, 4, 7, 10,  2, 5, 8, 11]` |
+| `default_dof_pos` | `[0,0,0,0, 0.8,0.8,0.8,0.8, -1.5,-1.5,-1.5,-1.5]` |
+| `rl_kp` / `rl_kd` | `45.0` / `1.2`（训练 `stiffness` / `damping`） |
+| `torque_limits` | `30.0`（训练 `effort_limit`） |
+| `action_scale` / `commands_scale` | `0.25` × 12 / `[1,1,1]` |
+| `observations_history` | `[0..5]`（训练 `history_length=5` → 6 帧 × 45 = 270 维输入） |
+
+> ⚠️ 这里的腿序（fl→fr→hl→hr）是**按 URDF link 声明顺序 + 层序遍历推出来的，尚未用
+> `robot.joint_names` 直接确认**。它只能解释"站得住"，不能解释"走得直"——若实测
+> 给正向指令后横走/打转，改用 `[3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]`（腿序 fr→fl→hr→hl）。
+
 ---
 
 ## 一句话总结
@@ -883,3 +1006,7 @@ LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 ./cmake_build/bin/rl_sim_muj
 > 用 `sensor_adr`（不是元素序号）校验，
 > 把 YAML 的两个顶层 key 写对，
 > 剩下的事就都是可查表解决的。
+>
+> 唯一的例外是**训练侧的关节顺序**——它不在你的控制范围内，
+> 只能从 `robot.joint_names` 读出来，
+> 并按同一次序推出 `joint_mapping` 和 `default_dof_pos`（见 1.4.1）。
